@@ -2,7 +2,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { Scene } from "../types";
 
 const getClient = () => {
-    return new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
+    return new GoogleGenAI({ apiKey: process.env.API_KEY });
 }
 
 export const breakdownStory = async (storyText: string): Promise<Scene[]> => {
@@ -17,7 +17,7 @@ export const breakdownStory = async (storyText: string): Promise<Scene[]> => {
     Story: ${storyText}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-1.5-flash',
+      model: 'gemini-2.5-flash',
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -66,7 +66,7 @@ export const analyzeCharacterFromImage = async (base64Image: string): Promise<st
     const data = matches[2];
 
     const response = await ai.models.generateContent({
-        model: 'gemini-1.5-flash',
+        model: 'gemini-2.5-flash',
         contents: {
             parts: [
                 {
@@ -90,66 +90,49 @@ export const analyzeCharacterFromImage = async (base64Image: string): Promise<st
 };
 
 export const generateImageFromPrompt = async (promptText: string, referenceImageBase64?: string): Promise<string> => {
-  const ai = getClient();
-  
-  // 1. 准备基础的文字提示词
-  const textPart = { text: promptText };
-  
-  // 2. 准备请求内容：默认是 [文字]
-  let requestParts: any[] = [textPart];
-
-  // 3. 如果有参考图，尝试把它加进去
-  if (referenceImageBase64) {
-      const matches = referenceImageBase64.match(/^data:(.+);base64,(.+)$/);
-      if (matches) {
-           requestParts.unshift({ 
-              inlineData: {
-                  mimeType: matches[1],
-                  data: matches[2]
-              }
-          });
-      }
-  }
-
-  // 定义一个通用的发送请求函数
-  const callGenAI = async (parts: any[]) => {
-      const response = await ai.models.generateContent({
-        model: 'imagen-3.0-generate-001', 
-        contents: { parts: parts }
-        // ⚠️ 删除了这里的 config: { responseMimeType... } 
-        // 因为就是这一行导致了 'INVALID_ARGUMENT' 报错
-      });
-      return response;
-  };
-
   try {
-    // 【尝试 A】：发送 (参考图 + 文字)
-    const response = await callGenAI(requestParts);
+    const ai = getClient();
     
-    for (const part of response.candidates?.[0]?.content?.parts || []) {
-      if (part.inlineData) {
-        return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
-      }
-    }
-    throw new Error("No image in response");
+    const parts: any[] = [];
 
-  } catch (error: any) {
-    // 【尝试 B (自动保底)】：报错则自动降级为纯文字生成
+    // Add reference image if available
     if (referenceImageBase64) {
-        console.warn("参考图生成失败，自动降级为纯文字生成...", error.message);
-        try {
-            const retryResponse = await callGenAI([textPart]); 
-            for (const part of retryResponse.candidates?.[0]?.content?.parts || []) {
-                if (part.inlineData) {
-                    return `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+        const matches = referenceImageBase64.match(/^data:(.+);base64,(.+)$/);
+        if (matches) {
+             parts.push({
+                inlineData: {
+                    mimeType: matches[1],
+                    data: matches[2]
                 }
-            }
-        } catch (retryError) {
-            console.error("纯文字重试也失败:", retryError);
-            throw retryError;
+            });
         }
     }
-    console.error("Final Image Gen Error:", error);
-    throw error;
+
+    // Add text prompt
+    parts.push({ text: promptText });
+    
+    // Using gemini-2.5-flash-image (Nano Banana) as requested for non-paid implementation
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: parts
+      },
+      config: {
+        imageConfig: {
+            aspectRatio: "1:1" 
+        }
+      }
+    });
+
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
+    }
+
+    throw new Error("No image generated.");
+  } catch (error: any) {
+    console.error("Gemini Image Gen Error:", error);
+    throw new Error("Failed to generate image.");
   }
 };
