@@ -17,7 +17,7 @@ export const breakdownStory = async (storyText: string): Promise<Scene[]> => {
     Story: ${storyText}`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-1.5-flash',
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -66,7 +66,7 @@ export const analyzeCharacterFromImage = async (base64Image: string): Promise<st
     const data = matches[2];
 
     const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-1.5-flash',
         contents: {
             parts: [
                 {
@@ -111,9 +111,9 @@ export const generateImageFromPrompt = async (promptText: string, referenceImage
     // Add text prompt
     parts.push({ text: promptText });
     
-    // Using gemini-2.5-flash-image (Nano Banana) as requested for non-paid implementation
+    // Using gemini-1.5-flash-image (Nano Banana) as requested for non-paid implementation
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
+      model: 'gemini-1.5-flash-image',
       contents: {
         parts: parts
       },
