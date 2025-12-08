@@ -2,7 +2,15 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { Scene } from "../types";
 
 const getClient = () => {
-    return new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
+    // ✅ 上线版：使用 Vite 标准方式读取，且变量名必须以 VITE_ 开头
+    const apiKey = import.meta.env.VITE_GOOGLE_API_KEY;
+    
+    if (!apiKey) {
+        console.error("Missing VITE_GOOGLE_API_KEY in environment variables");
+        throw new Error("Google API Key not found");
+    }
+    
+    return new GoogleGenAI({ apiKey });
 }
 
 export const breakdownStory = async (storyText: string): Promise<Scene[]> => {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   ArrowRight, 
   Upload, 
@@ -8,19 +8,24 @@ import {
   Trash2, 
   Plus, 
   Check, 
-  LayoutGrid, 
-  PenTool, 
   Loader2,
   RefreshCcw,
   Download,
   ChevronLeft,
   X,
   Image as ImageIcon,
-  RotateCcw,
-  Maximize2
+  Maximize2,
+  Save,
+  RotateCcw
 } from 'lucide-react';
 import { breakdownStory, generateImageFromPrompt, analyzeCharacterFromImage } from './services/geminiService';
 import { AppStep, CharacterData, Scene, STYLES } from './types';
+import { supabase } from './services/supabase';
+import { Session } from '@supabase/supabase-js';
+import Auth from './Auth';
+import { UserMenu } from './components/UserMenu';
+import { Gallery } from './components/Gallery';
+import { StepResult } from './components/StepResult';
 
 // --- Components ---
 
@@ -37,12 +42,13 @@ const Card: React.FC<{
   </div>
 );
 
-const Button = ({ children, onClick, variant = 'primary', className = '', disabled = false, title = '' }: { children?: React.ReactNode; onClick?: () => void; variant?: 'primary' | 'secondary' | 'outline'; className?: string; disabled?: boolean; title?: string }) => {
+const Button = ({ children, onClick, variant = 'primary', className = '', disabled = false, title = '' }: { children?: React.ReactNode; onClick?: () => void; variant?: 'primary' | 'secondary' | 'outline' | 'success'; className?: string; disabled?: boolean; title?: string }) => {
   const baseStyle = "px-6 py-3 rounded-full font-semibold transition-all duration-200 flex items-center justify-center gap-2 active:scale-95 disabled:active:scale-100 disabled:opacity-50 disabled:cursor-not-allowed";
   const variants = {
     primary: "bg-black text-white hover:bg-gray-800 disabled:bg-gray-300",
     secondary: "bg-gray-100 text-gray-900 hover:bg-gray-200 disabled:bg-gray-50 disabled:text-gray-400",
-    outline: "border-2 border-gray-200 text-gray-700 hover:border-gray-900 disabled:opacity-50"
+    outline: "border-2 border-gray-200 text-gray-700 hover:border-gray-900 disabled:opacity-50",
+    success: "bg-green-600 text-white hover:bg-green-700 border border-transparent shadow-sm"
   };
 
   return (
@@ -66,22 +72,71 @@ const ProgressBar = ({ current, total }: { current: number; total: number }) => 
 // --- Main Application ---
 
 export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  // Navigation State
   const [step, setStep] = useState<AppStep>('hero');
+  const [returnTo, setReturnTo] = useState<AppStep | null>(null);
+
+  // Generator Data State
   const [character, setCharacter] = useState<CharacterData>({ description: '' });
   const [rawStory, setRawStory] = useState('');
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [selectedStyle, setSelectedStyle] = useState<string>('');
   
-  // App State
+  // App UI State
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const [previewSceneId, setPreviewSceneId] = useState<string | null>(null);
+  
+  // Auth & Session Logic
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setCheckingSession(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (_event === 'SIGNED_IN') {
+        // If user was on auth page, move them to returnTo or Home
+        if (step === 'auth') {
+             // Effect hook below will handle redirection based on session update
+        }
+      }
+      if (_event === 'SIGNED_OUT') {
+        setStep('hero');
+        handleResetApp();
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Post-Login Redirect Effect
+  useEffect(() => {
+    if (session && step === 'auth') {
+      if (returnTo) {
+        setStep(returnTo);
+        setReturnTo(null);
+      } else {
+        setStep('hero');
+      }
+    }
+  }, [session, step, returnTo]);
 
   // --- Handlers ---
 
-  const handleResetApp = () => {
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    handleResetApp();
     setStep('hero');
+  };
+
+  const handleResetApp = () => {
     setCharacter({ description: '' });
     setRawStory('');
     setScenes([]);
@@ -89,10 +144,21 @@ export default function App() {
     setIsGenerating(false);
     setIsAnalyzing(false);
     setErrorMsg('');
-    setPreviewSceneId(null);
   };
 
-  const handleStart = () => setStep('character');
+  const handleStart = () => {
+    if (session) {
+      setStep('character');
+    } else {
+      setReturnTo('character');
+      setStep('auth');
+    }
+  };
+
+  const navigateToAuth = () => {
+    setReturnTo(null); // Simple sign in from header, no specific return
+    setStep('auth');
+  };
 
   const handleCharacterUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -258,8 +324,18 @@ export default function App() {
   };
 
   const handleGenerate = async () => {
-    setStep('result');
+    // 1. Prepare scenes immediately to avoid flickering (sets isGenerating: true on all items)
+    const resetScenes = scenes.map(s => ({
+        ...s,
+        imageUrl: undefined,
+        isGenerating: true,
+        error: null
+    }));
+    
+    // 2. Update State BEFORE switching view
+    setScenes(resetScenes);
     setIsGenerating(true);
+    setStep('result');
     
     const styleData = STYLES.find(s => s.id === selectedStyle);
     const stylePrompt = styleData ? styleData.promptModifier : '';
@@ -269,7 +345,7 @@ export default function App() {
     
     let visualAnalysis = "";
 
-    // 1. Pre-Analysis Phase
+    // 3. Pre-Analysis Phase
     if (refImage) {
       try {
         visualAnalysis = await analyzeCharacterFromImage(refImage);
@@ -278,7 +354,7 @@ export default function App() {
       }
     }
 
-    // 2. Build Character Context
+    // 4. Build Character Context
     let characterContext = "";
     
     if (refImage && character.description.trim()) {
@@ -311,22 +387,11 @@ export default function App() {
         ? "frame, border, square box, bounding box, panel edges, comic panel layout, grid, rectangle border, frame lines, corner, canvas frame, tiny characters, large empty space"
         : "Do not create a grid; generate a single image. tiny characters, zoomed out";
 
-    // RESET SCENES: Clear previous images and set initial generating state for all
-    // This ensures the UI shows "loading" indicators for everything immediately.
-    const resetScenes = scenes.map(s => ({
-        ...s,
-        imageUrl: undefined,
-        isGenerating: true, // Set all to generating initially for loading effect
-        error: null
-    }));
-    setScenes(resetScenes);
-
-    // Create a mutable copy to track progress in loop
+    // 5. Generate loop using the resetScenes we created earlier
     const updatedScenes = [...resetScenes];
     
-    // Process scenes
     for (let i = 0; i < updatedScenes.length; i++) {
-        // Redundant set true, but keeps logic clear if we didn't set all true above
+        // Ensure state is synced
         updatedScenes[i].isGenerating = true;
         setScenes([...updatedScenes]); 
         
@@ -370,8 +435,8 @@ export default function App() {
   // --- Views ---
 
   const renderHeroView = () => (
-    <div className="flex flex-col items-center justify-center min-h-[80vh] max-w-4xl mx-auto text-center px-6">
-      <div className="mb-6 inline-flex items-center gap-2 bg-gray-100 px-4 py-2 rounded-full text-sm font-medium text-gray-600 animate-fade-in-up">
+    <div className="flex flex-col items-center justify-center min-h-[70vh] max-w-4xl mx-auto text-center px-6 animate-fade-in">
+      <div className="mb-6 inline-flex items-center gap-2 bg-gray-100 px-4 py-2 rounded-full text-sm font-medium text-gray-600">
         <Sparkles size={16} className="text-yellow-500" />
         User Research to Comic in Seconds
       </div>
@@ -379,11 +444,11 @@ export default function App() {
         Make your research <br/>
         <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-purple-600">Unforgettable.</span>
       </h1>
-      <p className="text-xl text-gray-500 mb-10 max-w-2xl leading-relaxed">
+      <p className="text-xl text-gray-500 mb-10 max-w-2xl leading-relaxed mx-auto">
         Turn boring user journey reports into engaging comic strips. 
         Consistent characters, perfect scenes, zero drawing skills required.
       </p>
-      <div className="flex gap-4">
+      <div className="flex gap-4 justify-center">
         <Button onClick={handleStart} className="text-lg px-8 py-4 shadow-lg hover:shadow-xl hover:-translate-y-1">
             Start Creating <ArrowRight size={20} />
         </Button>
@@ -668,202 +733,68 @@ export default function App() {
     </div>
   );
 
-  const renderResultView = () => (
-    <div className="max-w-6xl mx-auto">
-       <div className="flex justify-between items-center mb-8">
-         <div className="flex items-center gap-4">
-             <Button 
-                variant="secondary" 
-                className="w-12 h-12 !px-0 rounded-full" 
-                onClick={() => {
-                   // Clear images when going back to style to ensure fresh generation visuals next time
-                   setScenes(prev => prev.map(s => ({ ...s, imageUrl: undefined, isGenerating: false, error: null })));
-                   setStep('style');
-                }}
-             >
-                 <ChevronLeft size={24} />
-             </Button>
-            <div>
-                <h2 className="text-3xl font-bold">Your Storyboard</h2>
-                <p className="text-gray-500">
-                    {isGenerating ? 'AI is painting your scenes...' : `${scenes.length} panels generated.`}
-                </p>
-            </div>
-         </div>
-         
-         {/* Actions */}
-         <div className="flex gap-3">
-             <Button variant="secondary" onClick={handleResetApp}><RotateCcw size={16} /> Restart</Button>
-             {!isGenerating && (
-                <>
-                 <Button variant="outline" onClick={handleGenerate}><RefreshCcw size={16} /> Regenerate All</Button>
-                 <Button onClick={handleDownloadAll}><Download size={16} /> Download All</Button>
-                </>
-             )}
-         </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-          {scenes.map((scene, idx) => (
-              <div key={scene.id} className="flex flex-col gap-4 group">
-                  <Card className="aspect-square overflow-hidden relative shadow-lg border-0 bg-gray-50 group">
-                      {scene.imageUrl ? (
-                        <>
-                          {/* Image with blur effect when regenerating */}
-                          <img 
-                            src={scene.imageUrl} 
-                            alt={scene.description} 
-                            className={`w-full h-full object-cover animate-fade-in transition-all duration-300 ${scene.isGenerating ? 'blur-sm scale-105' : ''}`} 
-                          />
-                          
-                          {/* LOADING OVERLAY FOR REGENERATION (Synchronized state) */}
-                          {scene.isGenerating && (
-                            <div className="absolute inset-0 flex items-center justify-center bg-white/40 backdrop-blur-sm z-30">
-                                <Loader2 size={48} className="animate-spin text-gray-900" />
-                            </div>
-                          )}
-                          
-                          {/* HOVER OVERLAY (Only shows if NOT generating) */}
-                          {!scene.isGenerating && (
-                            <div 
-                                className="absolute inset-0 bg-black/40 backdrop-blur-[2px] opacity-0 group-hover:opacity-100 transition-all duration-300 cursor-pointer z-20 flex items-center justify-center"
-                                onClick={() => setPreviewSceneId(scene.id)}
-                            >
-                                {/* Maximize Hint */}
-                                <div className="absolute top-4 right-4 text-white/80 group-hover:text-white transition-colors">
-                                  <Maximize2 size={20} />
-                                </div>
-
-                                {/* Action Buttons */}
-                                <div className="flex items-center gap-4">
-                                  <button 
-                                      onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleRegenerateSingle(idx);
-                                      }}
-                                      className="bg-white text-gray-900 p-4 rounded-full shadow-2xl hover:bg-gray-100 hover:scale-110 transition-all transform active:scale-95 flex items-center justify-center"
-                                      title="Regenerate Scene"
-                                  >
-                                      <RefreshCcw size={24} />
-                                  </button>
-                                  <button 
-                                      onClick={(e) => {
-                                          e.stopPropagation();
-                                          downloadImage(scene.imageUrl!, `storyboard_panel_${idx+1}.png`);
-                                      }}
-                                      className="bg-white text-gray-900 p-4 rounded-full shadow-2xl hover:bg-gray-100 hover:scale-110 transition-all transform active:scale-95 flex items-center justify-center"
-                                      title="Download PNG"
-                                  >
-                                      <Download size={24} />
-                                  </button>
-                                </div>
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <div className={`absolute inset-0 flex items-center justify-center flex-col p-8 text-center`}>
-                           {scene.isGenerating ? (
-                               <>
-                                <Loader2 size={48} className="animate-spin mb-4 text-indigo-400" />
-                                <p className="text-sm font-medium text-gray-400">Generating Panel {idx + 1}...</p>
-                               </>
-                           ) : (
-                               <p className="text-gray-300">Waiting...</p>
-                           )}
-                        </div>
-                      )}
-                      
-                      <div className="absolute bottom-4 left-4 bg-white/90 backdrop-blur px-3 py-1 rounded-full text-xs font-bold text-gray-800 shadow-sm z-10">
-                          0{idx + 1}
-                      </div>
-                  </Card>
-                  <div className="px-2">
-                    <p className="text-gray-600 text-sm leading-relaxed">{scene.description}</p>
-                  </div>
-              </div>
-          ))}
-      </div>
-    </div>
+  const renderGalleryView = () => (
+    <Gallery 
+      userId={session?.user.id || ''} 
+      onBack={() => setStep('hero')}
+      onCreate={() => setStep('character')}
+    />
   );
 
-  const renderPreviewModal = () => {
-    if (!previewSceneId) return null;
-    const activeSceneIndex = scenes.findIndex(s => s.id === previewSceneId);
-    if (activeSceneIndex === -1) return null;
-    const activeScene = scenes[activeSceneIndex];
-
-    return (
-        <div 
-            className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6"
-        >
-            {/* Backdrop */}
-            <div 
-                className="absolute inset-0 bg-gray-900/60 backdrop-blur-sm transition-opacity"
-                onClick={() => setPreviewSceneId(null)}
-            ></div>
-
-            {/* Modal Content */}
-            <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden animate-fade-in-up">
-                {/* Modal Header */}
-                <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-white z-10">
-                    <h3 className="font-semibold text-gray-900 text-lg">Scene Preview</h3>
-                    <button 
-                        className="p-2 hover:bg-gray-100 rounded-full text-gray-500 hover:text-gray-900 transition-colors"
-                        onClick={() => setPreviewSceneId(null)}
-                    >
-                        <X size={20} />
-                    </button>
-                </div>
-                
-                {/* Image Area */}
-                <div className="flex-1 overflow-auto bg-gray-50 p-4 flex items-center justify-center relative">
-                    {activeScene.imageUrl ? (
-                        <img 
-                            src={activeScene.imageUrl} 
-                            alt="Scene Preview" 
-                            className={`max-w-full max-h-[70vh] object-contain rounded-lg shadow-sm ${activeScene.isGenerating ? 'opacity-50 blur-sm' : ''} transition-all duration-300`}
-                            onClick={(e) => e.stopPropagation()} 
-                        />
-                    ) : (
-                        <div className="flex flex-col items-center text-gray-400">
-                             <ImageIcon size={48} className="mb-2 opacity-50"/>
-                             <p>Image unavailable</p>
-                        </div>
-                    )}
-                    
-                    {/* Loader Overlay for Modal */}
-                    {activeScene.isGenerating && (
-                        <div className="absolute inset-0 flex items-center justify-center z-20">
-                            <div className="bg-white/90 backdrop-blur-md px-6 py-4 rounded-2xl shadow-xl flex items-center gap-3 border border-gray-100">
-                                <Loader2 className="animate-spin text-gray-900" />
-                                <span className="font-medium text-gray-900">Regenerating...</span>
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                {/* Modal Footer */}
-                <div className="px-6 py-4 border-t border-gray-100 bg-white flex justify-end gap-3 z-10">
-                     <Button 
-                        variant="secondary" 
-                        onClick={() => handleRegenerateSingle(activeSceneIndex)}
-                        disabled={activeScene.isGenerating}
-                        className="min-w-[140px]"
-                    >
-                        <RefreshCcw size={16} className={`mr-2 ${activeScene.isGenerating ? 'animate-spin' : ''}`} />
-                        {activeScene.isGenerating ? 'Generating...' : 'Regenerate'}
-                     </Button>
-                     <Button 
-                        onClick={() => downloadImage(activeScene.imageUrl || '', `storyboard_panel_${activeSceneIndex + 1}.png`)}
-                        disabled={!activeScene.imageUrl || activeScene.isGenerating}
-                     >
-                        <Download size={16} className="mr-2" /> Download Image
-                     </Button>
-                </div>
-            </div>
-        </div>
-    );
+  const renderContent = () => {
+    switch (step) {
+      case 'hero':
+        return renderHeroView();
+      case 'auth':
+        return <Auth />;
+      case 'gallery':
+        // Protected
+        if (!session) {
+          setReturnTo('gallery');
+          setStep('auth');
+          return null;
+        }
+        return renderGalleryView();
+      case 'character':
+      case 'story':
+      case 'style':
+      case 'result':
+        // Protected Generator Steps
+        if (!session) {
+          setReturnTo('character');
+          setStep('auth');
+          return null;
+        }
+        if (step === 'character') return renderCharacterView();
+        if (step === 'story') return renderStoryView();
+        if (step === 'style') return renderStyleView();
+        if (step === 'result') return (
+          <StepResult
+            scenes={scenes}
+            userId={session.user.id}
+            onRegenerate={(id) => handleRegenerateSingle(scenes.findIndex(s => s.id === id))}
+            onRegenerateAll={handleGenerate}
+            onDownloadAll={handleDownloadAll}
+            onReset={handleResetApp}
+            onBack={() => {
+              setScenes(prev => prev.map(s => ({ ...s, imageUrl: undefined, isGenerating: false, error: null })));
+              setStep('style');
+            }}
+          />
+        );
+        return null;
+      default:
+        return renderHeroView();
+    }
   };
+
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen bg-[#FDFDFD] flex items-center justify-center">
+        <Loader2 className="animate-spin text-gray-900" size={32} />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#FDFDFD] font-sans text-gray-900 selection:bg-indigo-100 selection:text-indigo-900 pb-20">
@@ -871,24 +802,29 @@ export default function App() {
       {/* Header */}
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-100">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2 cursor-pointer" onClick={handleResetApp}>
+          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setStep('hero')}>
             <div className="w-8 h-8 bg-black rounded-lg flex items-center justify-center text-white font-bold text-xl">S</div>
             <span className="font-bold text-lg tracking-tight">StoryBoarder</span>
           </div>
-          <div className="text-sm text-gray-500 font-medium">v3.0</div>
+          <div>
+             {session ? (
+               <UserMenu 
+                 email={session.user.email || ''} 
+                 onLogout={handleSignOut} 
+                 onOpenGallery={() => setStep('gallery')} 
+               />
+             ) : (
+               <Button variant="secondary" onClick={navigateToAuth} className="px-5 py-2 text-sm">
+                  Sign In
+               </Button>
+             )}
+          </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-10">
-        {step === 'hero' && renderHeroView()}
-        {step === 'character' && renderCharacterView()}
-        {step === 'story' && renderStoryView()}
-        {step === 'style' && renderStyleView()}
-        {step === 'result' && renderResultView()}
+        {renderContent()}
       </main>
-
-      {/* Preview Modal */}
-      {renderPreviewModal()}
     </div>
   );
 }

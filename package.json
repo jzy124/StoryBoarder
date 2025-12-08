@@ -1,5 +1,5 @@
 {
-  "name": "storyboarder-ai_v3",
+  "name": "storyboarder-ai_v5_global",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -12,7 +12,8 @@
     "react-dom": "^19.2.0",
     "react": "^19.2.0",
     "@google/genai": "^1.30.0",
-    "lucide-react": "^0.554.0"
+    "lucide-react": "^0.554.0",
+    "@supabase/supabase-js": "2.39.7"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

@@ -1,6 +1,6 @@
 import { LayoutGrid, PenTool, Pencil, Sparkles, Smile, Feather } from 'lucide-react';
 
-export type AppStep = 'hero' | 'character' | 'story' | 'style' | 'result';
+export type AppStep = 'hero' | 'auth' | 'character' | 'story' | 'style' | 'result' | 'gallery';
 
 export enum CharacterMode {
   UPLOAD = 'upload',
