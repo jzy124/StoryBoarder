@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { User, LogOut, LayoutGrid, ChevronDown } from 'lucide-react';
+import { User, LogOut, LayoutGrid, ChevronDown, MessageSquare } from 'lucide-react';
 
 interface UserMenuProps {
   email: string;
@@ -51,6 +51,15 @@ export const UserMenu: React.FC<UserMenuProps> = ({ email, onLogout, onOpenGalle
             <LayoutGrid size={16} className="text-gray-500" />
             My Gallery
           </button>
+          
+          <a
+            href="mailto:storyboarder.feedback@gmail.com?subject=StoryBoard AI Feedback (V1.1)"
+            onClick={() => setIsOpen(false)}
+            className="w-full text-left px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2 transition-colors"
+          >
+            <MessageSquare size={16} className="text-gray-500" />
+            Feedback
+          </a>
           
           <button
             onClick={() => {
