@@ -1,0 +1,155 @@
+import React, { useEffect, useState } from 'react';
+import { supabase } from '../services/supabase';
+import { Button } from './Button';
+import { ShareBtn } from './ShareBtn';
+import { Home, Loader2, Download, Calendar, ArrowLeft } from 'lucide-react';
+
+interface Props {
+  id: string;
+  onNavigateHome: () => void;
+}
+
+interface SavedImage {
+  id: string;
+  created_at: string;
+  image_url: string;
+  caption: string;
+  user_id: string;
+}
+
+export const GalleryDetailPage: React.FC<Props> = ({ id, onNavigateHome }) => {
+  const [image, setImage] = useState<SavedImage | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const fetchImage = async () => {
+      setLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from('saved_images')
+          .select('*')
+          .eq('id', id)
+          .single();
+
+        if (error) throw error;
+        setImage(data);
+        
+        // Update Metadata (Client-side SEO)
+        if (data) {
+           document.title = `StoryBoard AI: ${data.caption.substring(0, 30)}...`;
+        }
+      } catch (err: any) {
+        console.error('Error fetching image:', err);
+        setError('Image not found or has been deleted.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    if (id) {
+        fetchImage();
+    }
+    
+    // Cleanup title
+    return () => {
+        document.title = 'StoryBoarder AI';
+    };
+  }, [id]);
+
+  const handleDownload = () => {
+    if (!image) return;
+    const link = document.createElement('a');
+    link.href = image.image_url;
+    link.download = `storyboard-${image.id}.png`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-[80vh] flex flex-col items-center justify-center animate-fade-in">
+        <Loader2 className="animate-spin text-gray-900 mb-4" size={32} />
+        <p className="text-gray-500">Loading scene...</p>
+      </div>
+    );
+  }
+
+  if (error || !image) {
+    return (
+      <div className="min-h-[80vh] flex flex-col items-center justify-center animate-fade-in text-center px-4">
+        <div className="w-16 h-16 bg-red-50 text-red-500 rounded-full flex items-center justify-center mb-6">
+            <span className="text-2xl font-bold">!</span>
+        </div>
+        <h2 className="text-2xl font-bold text-gray-900 mb-2">Oops!</h2>
+        <p className="text-gray-500 mb-8 max-w-md">{error || "We couldn't find the page you're looking for."}</p>
+        <Button onClick={onNavigateHome}>
+             <Home size={18} className="mr-2" /> Go Home
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto animate-fade-in-up pb-20">
+      {/* Navbar for this view */}
+      <div className="flex justify-between items-center mb-8">
+         <Button variant="ghost" onClick={onNavigateHome} className="pl-0 hover:bg-transparent text-gray-500 hover:text-gray-900">
+            <ArrowLeft size={20} className="mr-2" /> Back to Home
+         </Button>
+         <div className="flex gap-2">
+            <ShareBtn id={image.id} variant="primary" />
+            <Button variant="secondary" onClick={handleDownload} title="Download Image">
+                <Download size={18} />
+            </Button>
+         </div>
+      </div>
+
+      <div className="bg-white rounded-[32px] shadow-xl border border-gray-100 overflow-hidden">
+        {/* Image Container */}
+        <div className="bg-gray-50 flex items-center justify-center min-h-[400px] p-4 md:p-8">
+             <img 
+                src={image.image_url} 
+                alt={image.caption} 
+                className="max-w-full max-h-[80vh] object-contain rounded-lg shadow-sm" 
+             />
+        </div>
+
+        {/* Content */}
+        <div className="p-8 md:p-10">
+            <div className="flex items-center gap-2 text-sm text-gray-400 font-medium mb-4 uppercase tracking-wider">
+                <Calendar size={14} /> {formatDate(image.created_at)}
+            </div>
+            
+            <h1 className="text-2xl md:text-3xl font-bold text-gray-900 mb-6 leading-tight">
+                {image.caption}
+            </h1>
+
+            <div className="flex items-center gap-4 pt-6 border-t border-gray-100">
+                 <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold">
+                    S
+                 </div>
+                 <div>
+                    <p className="text-sm font-bold text-gray-900">Generated with StoryBoard AI</p>
+                    <p className="text-xs text-gray-500">Create your own visual stories in seconds.</p>
+                 </div>
+                 <div className="ml-auto">
+                    <Button size="sm" variant="secondary" onClick={onNavigateHome}>
+                        Try it now
+                    </Button>
+                 </div>
+            </div>
+        </div>
+      </div>
+    </div>
+  );
+};

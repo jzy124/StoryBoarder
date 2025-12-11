@@ -26,6 +26,7 @@ import Auth from './Auth';
 import { UserMenu } from './components/UserMenu';
 import { Gallery } from './components/Gallery';
 import { StepResult } from './components/StepResult';
+import { GalleryDetailPage } from './components/GalleryDetailPage';
 import posthog from 'posthog-js';
 
 // --- Components ---
@@ -79,6 +80,9 @@ export default function App() {
   // Navigation State
   const [step, setStep] = useState<AppStep>('hero');
   const [returnTo, setReturnTo] = useState<AppStep | null>(null);
+  
+  // Specific for Deep Linking
+  const [sharedImageId, setSharedImageId] = useState<string | null>(null);
 
   // Generator Data State
   const [character, setCharacter] = useState<CharacterData>({ description: '' });
@@ -91,8 +95,26 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   
-  // Auth & Session Logic
+  // Logic to handle standalone URLs (simulating a router)
   useEffect(() => {
+    const handleUrlRoute = () => {
+        const path = window.location.pathname;
+        
+        // Match /gallery/:id
+        const galleryMatch = path.match(/^\/gallery\/([a-zA-Z0-9-]+)$/);
+        
+        if (galleryMatch) {
+            setSharedImageId(galleryMatch[1]);
+            setStep('gallery-detail');
+            setCheckingSession(false); // Skip session check block for public view
+            return true;
+        }
+        return false;
+    };
+
+    if (handleUrlRoute()) return;
+
+    // Normal Auth Flow if not deep linking
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setCheckingSession(false);
@@ -111,7 +133,10 @@ export default function App() {
       }
       if (_event === 'SIGNED_OUT') {
         posthog.reset();
-        setStep('hero');
+        // If we are on a detail page, don't force redirect to hero
+        if (step !== 'gallery-detail') {
+            setStep('hero');
+        }
         resetState();
       }
     });
@@ -151,6 +176,12 @@ export default function App() {
 
   // "Start Creating" Button Logic
   const handleStart = () => {
+    // If coming from detail page, clear it
+    if (step === 'gallery-detail') {
+        // Clear URL but keeping it simple for now (pushState can be added)
+        window.history.pushState({}, '', '/');
+    }
+
     resetState(); // Fresh start required
     if (session) {
       setStep('character');
@@ -162,6 +193,9 @@ export default function App() {
 
   // Logo Click Logic
   const handleLogoClick = () => {
+    if (step === 'gallery-detail') {
+        window.history.pushState({}, '', '/');
+    }
     resetState(); // Fresh start required
     setStep('hero');
   };
@@ -754,6 +788,17 @@ export default function App() {
       }}
     />
   );
+  
+  const renderGalleryDetailView = () => (
+      sharedImageId ? (
+          <GalleryDetailPage 
+            id={sharedImageId} 
+            onNavigateHome={handleLogoClick}
+          />
+      ) : (
+          renderHeroView()
+      )
+  );
 
   const renderContent = () => {
     switch (step) {
@@ -761,6 +806,8 @@ export default function App() {
         return renderHeroView();
       case 'auth':
         return <Auth />;
+      case 'gallery-detail':
+        return renderGalleryDetailView();
       case 'gallery':
         // Protected Route
         if (!session) {
@@ -821,7 +868,23 @@ export default function App() {
             <span className="font-bold text-lg tracking-tight">StoryBoarder</span>
           </div>
           <div>
-             {session ? (
+             {/* If in public detail view, show minimal header or different actions */}
+             {step === 'gallery-detail' ? (
+                session ? (
+                     <UserMenu 
+                        email={session.user.email || ''} 
+                        onLogout={handleSignOut} 
+                        onOpenGallery={() => {
+                             window.history.pushState({}, '', '/');
+                             setStep('gallery');
+                        }} 
+                    />
+                ) : (
+                    <Button variant="secondary" onClick={handleStart} className="px-5 py-2 text-sm">
+                        Create Your Own
+                    </Button>
+                )
+             ) : session ? (
                <UserMenu 
                  email={session.user.email || ''} 
                  onLogout={handleSignOut} 

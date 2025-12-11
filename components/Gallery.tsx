@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { supabase } from '../services/supabase';
 import { Loader2, Calendar, ArrowLeft, Trash2, Maximize2, Download, Image as ImageIcon, AlertTriangle } from 'lucide-react';
 import { Button } from './Button';
+import { ShareBtn } from './ShareBtn';
 
 interface GalleryProps {
   userId: string;
@@ -230,6 +231,7 @@ export const Gallery: React.FC<GalleryProps> = ({ userId, onBack, onCreate }) =>
                         {previewImage.caption}
                     </p>
                     <div className="flex gap-3">
+                         <ShareBtn id={previewImage.id} />
                          <Button 
                              onClick={() => handleDownload(previewImage.image_url, `saved-image-${previewImage.id}.png`)}
                              variant="primary"
