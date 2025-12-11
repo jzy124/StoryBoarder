@@ -8,7 +8,6 @@ export default async function middleware(request: Request) {
   const segments = url.pathname.split('/');
   const id = segments[segments.length - 1];
 
-  // 1. 基础检查
   if (!id || id.includes('.')) {
     return fetch(request);
   }
@@ -17,9 +16,7 @@ export default async function middleware(request: Request) {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
     const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
-    // 2. 【关键修改】直接使用 fetch 调用 Supabase REST API
-    // 这样就完全不需要依赖 @supabase/supabase-js 库，避免 Edge 环境兼容问题
-    // 接口格式: https://xyz.supabase.co/rest/v1/table_name?id=eq.123&select=...
+    // 使用原生 fetch 请求 Supabase REST API (最稳定，无兼容性问题)
     const apiUrl = `${supabaseUrl}/rest/v1/saved_images?id=eq.${id}&select=image_url,caption`;
     
     const dbResponse = await fetch(apiUrl, {
@@ -30,22 +27,18 @@ export default async function middleware(request: Request) {
       }
     });
 
-    if (!dbResponse.ok) {
-        // 如果数据库报错，直接返回原始页面
-        return fetch(request); 
-    }
+    if (!dbResponse.ok) return fetch(request);
 
     const data = await dbResponse.json();
-    // data 是一个数组，我们取第一个
     const image = data && data.length > 0 ? data[0] : null;
 
     if (!image) return fetch(request);
 
-    // 3. 获取原始 HTML
+    // 获取原始 index.html
     const indexResponse = await fetch(new URL('/index.html', request.url));
     const html = await indexResponse.text();
 
-    // 4. 准备 Meta 标签
+    // 准备 Meta 标签
     const safeTitle = (image.caption || 'StoryBoard AI').replace(/"/g, '&quot;').substring(0, 50);
     const description = `Check out this comic panel: "${safeTitle}..."`;
     const imageUrl = image.image_url;
@@ -64,7 +57,7 @@ export default async function middleware(request: Request) {
       <meta name="twitter:image" content="${imageUrl}" />
     `;
 
-    // 5. 暴力插入
+    // 注入标签
     const modifiedHtml = html.replace('</head>', `${newMetaTags}</head>`);
 
     return new Response(modifiedHtml, {
@@ -76,6 +69,7 @@ export default async function middleware(request: Request) {
     });
 
   } catch (error) {
+    // 出错时静默失败，保证用户至少能看到网页
     console.error('Middleware Error:', error);
     return fetch(request);
   }
