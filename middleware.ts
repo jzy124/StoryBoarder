@@ -16,6 +16,7 @@ export default async function middleware(request: Request) {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
     const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
 
+    // 1. 获取 Supabase 数据
     const apiUrl = `${supabaseUrl}/rest/v1/saved_images?id=eq.${id}&select=image_url,caption`;
     
     const dbResponse = await fetch(apiUrl, {
@@ -33,9 +34,11 @@ export default async function middleware(request: Request) {
 
     if (!image) return fetch(request);
 
+    // 2. 获取原始 HTML
     const indexResponse = await fetch(new URL('/index.html', request.url));
     const html = await indexResponse.text();
 
+    // 3. 准备 Meta 标签
     const safeTitle = (image.caption || 'StoryBoard AI').replace(/"/g, '&quot;').substring(0, 50);
     const description = `Check out this comic panel: "${safeTitle}..."`;
     const imageUrl = image.image_url;
@@ -47,27 +50,17 @@ export default async function middleware(request: Request) {
       <meta property="og:image" content="${imageUrl}" />
       <meta property="og:image:width" content="1024" />
       <meta property="og:image:height" content="1024" />
+      <meta property="og:type" content="website" />
       
       <meta name="twitter:card" content="summary_large_image" />
       <meta name="twitter:title" content="${safeTitle}" />
       <meta name="twitter:description" content="${description}" />
       <meta name="twitter:image" content="${imageUrl}" />
-    `;
+      `;
 
-    // 【关键修改】在插入新标签前，先用正则把旧的标签“洗掉”
-    // 这样能确保 HTML 里只有一套正确的标签，防止 Twitter 抓错
-    let cleanedHtml = html
-      .replace(/<title>.*?<\/title>/g, '')
-      .replace(/<meta property="og:title".*?>/g, '')
-      .replace(/<meta property="og:description".*?>/g, '')
-      .replace(/<meta property="og:image".*?>/g, '')
-      .replace(/<meta name="twitter:title".*?>/g, '')
-      .replace(/<meta name="twitter:description".*?>/g, '')
-      .replace(/<meta name="twitter:image".*?>/g, '')
-      .replace(/<meta name="twitter:card".*?>/g, '');
-
-    // 将清洗后的 HTML 插入新标签
-    const modifiedHtml = cleanedHtml.replace('</head>', `${newMetaTags}</head>`);
+    // 4. 【核心改动】把新标签直接接在 <head> 后面
+    // 这样它们会出现在 HTML 的最顶端，覆盖掉后面任何默认标签
+    const modifiedHtml = html.replace('<head>', `<head>${newMetaTags}`);
 
     return new Response(modifiedHtml, {
       status: 200,
