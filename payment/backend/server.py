@@ -1,200 +1,222 @@
+# storyboarder/payment/backend/server.py (最终集成版)
+
+import os
 import stripe
-from flask import Flask, request, jsonify
-from flask_cors import CORS, cross_origin # 确保 cross_origin 还在
+import jwt
+from jwt import algorithms as jwt_algorithms
+import datetime
+from functools import wraps
+from flask import Flask, request, jsonify, current_app as app
+from flask_cors import CORS
 from flask_migrate import Migrate
-from flask_login import LoginManager, login_user, logout_user, current_user, login_required
+import logging # 导入日志模块
+import requests # 需要安装 requests 库: pip install requests
 
 from config import Config
 from models import db, User
 
-# --- 初始化应用和扩展 ---
-app = Flask(__name__, static_folder='../frontend', static_url_path='/')
+# --- 配置日志 ---
+logging.basicConfig(level=logging.INFO)
+
+# --- 初始化应用 ---
+app = Flask(__name__)
 app.config.from_object(Config)
 
-# --- 恢复并简化全局CORS配置 ---
-# 这个全局配置将处理所有不需要凭证的请求
-# 并且为预检请求(OPTIONS)提供基础的CORS头部
-CORS(app, origins=["http://localhost:5001", "http://127.0.0.1:5001"], supports_credentials=True)
-# ---------------------------------
+print(f"--- DEBUG: Loaded SUPABASE_JWT_SECRET is: {app.config.get('SUPABASE_JWT_SECRET')} ---")
+
+# --- 最终的、最强力的CORS配置 ---
+# 我们允许任何来源(*)在开发环境中访问，并确保所有必需的头部都已设置
+# 这可以彻底排除CORS配置错误
+CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+# -----------------------------------
 
 db.init_app(app)
 migrate = Migrate(app, db)
-
-login_manager = LoginManager()
-login_manager.init_app(app)
-
-# --- 定制Flask-Login的未授权处理 ---
-@login_manager.unauthorized_handler
-def unauthorized():
-    """当 @login_required 装饰器验证失败时，返回JSON格式的错误。"""
-    print(" unauthorized_handler 已被触发! 请求被拒绝。")
-    return jsonify(error="登录已过期或无效，请重新登录。"), 401
-
 stripe.api_key = app.config['STRIPE_SECRET_KEY']
 
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
+# --- 新的、基于JWKS的JWT认证装饰器 ---
+
+# 你的Supabase JWKS端点URL
+# ！！！请务必用你自己的项目URL替换掉这里的占位符！！！
+SUPABASE_JWKS_URL = 'https://kpbubonhlbmqucmijmfr.supabase.co/auth/v1/.well-known/jwks.json' 
+
+# 在 backend/server.py 顶部
+import json
+import time
+
+# --- 使用文件作为持久化缓存 ---
+JWKS_CACHE_FILE = 'jwks_cache.json'
+JWKS_CACHE_TTL_SECONDS = 3600 # 缓存有效期1小时
+
+def get_signing_key(token):
+    """
+    从JWKS端点获取公钥，并使用文件进行持久化缓存。
+    """
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+        kid = unverified_header.get('kid')
+        if not kid: raise Exception("Token header is missing 'kid'")
+
+        # 1. 尝试从文件缓存加载
+        if os.path.exists(JWKS_CACHE_FILE):
+            with open(JWKS_CACHE_FILE, 'r') as f:
+                try:
+                    cache_data = json.load(f)
+                    # 检查缓存是否过期
+                    if time.time() - cache_data.get('timestamp', 0) < JWKS_CACHE_TTL_SECONDS:
+                        key_dict = cache_data.get('keys', {}).get(kid)
+                        if key_dict:
+                            print(f"--- Found key for kid '{kid}' in file cache. ---")
+                            return jwt_algorithms.ECAlgorithm.from_jwk(key_dict) # 假设是EC
+                except (json.JSONDecodeError, KeyError):
+                    print("--- File cache is invalid. Fetching new keys. ---")
+
+        # 2. 如果缓存没有或无效，则从网络获取
+        print("--- JWKS Cache miss or expired. Fetching latest keys from Supabase... ---")
+        jwks_response = requests.get(SUPABASE_JWKS_URL)
+        jwks_response.raise_for_status()
+        jwks = jwks_response.json()
+
+        # 3. 处理并写入缓存文件
+        keys_to_cache = {key.get('kid'): key for key in jwks.get('keys', []) if key.get('kid')}
+        with open(JWKS_CACHE_FILE, 'w') as f:
+            json.dump({'timestamp': time.time(), 'keys': keys_to_cache}, f)
+        
+        # 4. 从刚获取的数据中寻找key
+        key_to_use_dict = keys_to_cache.get(kid)
+        if key_to_use_dict:
+            key_type = key_to_use_dict.get('kty')
+            if key_type == 'EC': return jwt_algorithms.ECAlgorithm.from_jwk(key_to_use_dict)
+            elif key_type == 'RSA': return jwt_algorithms.RSAAlgorithm.from_jwk(key_to_use_dict)
+            elif key_type == 'OKP': return jwt_algorithms.EdDSAAlgorithm.from_jwk(key_to_use_dict)
+
+        raise Exception(f"Unable to find appropriate key for kid: {kid} in fetched JWKS.")
+        
+    except Exception as e:
+        app.logger.error(f"Error getting signing key: {e}")
+        return None
+
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if not token:
+            return jsonify({'error': '授权Token缺失'}), 401
+        
+        try:
+            # --- 核心修正：简化调用逻辑 ---
+            # 直接调用新的 get_signing_key 函数，不再需要重试
+            signing_key = get_signing_key(token)
+            
+            # 如果获取密钥失败，直接返回错误
+            if not signing_key:
+                # get_signing_key 内部已经打印了详细日志，这里只返回通用错误
+                return jsonify({'error': '无法验证签名密钥'}), 500
+            
+            # -----------------------------
+
+            payload = jwt.decode(
+                token,
+                signing_key,
+                algorithms=["ES256", "RS256", "EdDSA"],
+                audience='authenticated'
+            )
+            
+            # --- 用户同步逻辑保持不变 ---
+            supabase_user_id = payload.get('sub')
+            if not supabase_user_id:
+                return jsonify({'error': 'Token中缺少用户信息(sub)'}), 401
+
+            current_user = User.query.filter_by(id=supabase_user_id).first()
+
+            if not current_user:
+                user_email = payload.get('email')
+                if not user_email:
+                    return jsonify({'error': 'Token中缺少email信息，无法自动注册'}), 400
+                current_user = User(
+                    id=supabase_user_id,
+                    email=user_email,
+                )
+                db.session.add(current_user)
+                db.session.commit()
+            
+            return f(current_user, *args, **kwargs)
+
+        except (jwt.ExpiredSignatureError, jwt.InvalidAudienceError, jwt.InvalidTokenError) as e:
+            app.logger.error(f"JWT验证失败: {e}")
+            return jsonify({'error': '无效的Token或已过期'}), 401
+        except Exception as e:
+            app.logger.error(f"认证过程中发生未知错误: {e}")
+            return jsonify({'error': f'认证失败: {str(e)}'}), 500
+        
+    return decorated
 
 # --- 辅助函数 ---
 def user_to_dict(user):
     return {"id": user.id, "email": user.email, "points": user.points}
 
-# --- 静态文件和主页路由 ---
-@app.route('/')
-def index():
-    return app.send_static_file('index.html')
-
-# --- 用户认证 API (不需要凭证) ---
-@app.route('/api/register', methods=['POST'])
-def register():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-
-    if not email or not password:
-        return jsonify({"error": "需要邮箱和密码"}), 400
-    if User.query.filter_by(email=email).first():
-        return jsonify({"error": "该邮箱已被注册"}), 400
-
-    user = User(email=email)
-    user.set_password(password)
-    db.session.add(user)
-    db.session.commit()
-    print(f"新用户注册成功: {email}")
-    return jsonify(user_to_dict(user)), 201
-
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
-    user = User.query.filter_by(email=email).first()
-
-    if user is None or not user.check_password(password):
-        return jsonify({"error": "邮箱或密码无效"}), 401
-
-    login_user(user)
-    print(f"用户登录成功: {email}")
-    return jsonify(user_to_dict(user))
-
-# 在 backend/server.py 中
-
-@app.route('/api/status')
-def status():
-    # 将配置信息也包含在status响应中
+# --- API 路由 ---
+@app.route('/api/user/profile')
+@token_required
+def get_user_profile(current_user):
+    """获取用户的点数和应用配置"""
     config_data = {
         "points_per_purchase": app.config['POINTS_PER_PURCHASE'],
         "cost_per_generation": app.config['COST_PER_GENERATION']
     }
-    
-    if current_user.is_authenticated:
-        return jsonify({
-            "user": user_to_dict(current_user),
-            "config": config_data
-        })
-    
-    # 即使用户未登录，也返回配置信息，以便登录页面可以显示
-    return jsonify({
-        "user": None,
-        "config": config_data
-    })
-
-# --- 需要认证的 API (使用 @cross_origin) ---
-@app.route('/api/logout', methods=['POST'])
-@cross_origin(supports_credentials=True)
-@login_required
-def logout():
-    print(f"用户登出: {current_user.email}")
-    logout_user()
-    return jsonify({"message": "已成功登出"})
+    return jsonify({ "user": user_to_dict(current_user), "config": config_data })
 
 @app.route('/api/generate', methods=['POST'])
-@cross_origin(supports_credentials=True)
-@login_required
-def generate():
-    # --- 最终调试：打印所有收到的请求头 ---
-    print("\n" + "="*20)
-    print(f"--- 调试 /api/generate 请求头 (用户: {current_user}) ---")
-    print(request.headers)
-    print("="*20 + "\n")
-    # ----------------------------------------
-    
-    print(f"收到来自用户 {current_user.email} 的生成请求。")
+@token_required
+def generate(current_user):
+    """处理生成请求并扣除点数"""
     if current_user.points < app.config['COST_PER_GENERATION']:
-        print(f"用户 {current_user.email} 点数不足。")
         return jsonify({"error": "点数不足，请充值"}), 402
-
     current_user.points -= app.config['COST_PER_GENERATION']
     db.session.commit()
-    print(f"扣除点数成功。用户 {current_user.email} 剩余点数: {current_user.points}")
-
-    return jsonify({
-        "message": "生成成功！",
-        "remaining_points": current_user.points
-    })
+    return jsonify({ "message": "点数扣除成功！", "remaining_points": current_user.points })
 
 @app.route('/api/create-checkout-session', methods=['POST'])
-@cross_origin(supports_credentials=True)
-@login_required
-def create_checkout_session():
-    print(f"为用户 {current_user.email} 创建Stripe支付会话。")
+@token_required
+def create_checkout_session(current_user):
+    """为当前登录用户创建Stripe支付会话"""
     try:
+        # 成功/取消URL现在应该指向你的Vite前端应用
+        success_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000') + '/payment-success'
+        cancel_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000') + '/'
+
         checkout_session = stripe.checkout.Session.create(
             client_reference_id=current_user.id,
             line_items=[{'price': app.config['STRIPE_PRICE_ID'], 'quantity': 1}],
             mode='payment',
-            success_url=f"{app.config['YOUR_DOMAIN']}/success.html",
-            cancel_url=f"{app.config['YOUR_DOMAIN']}/cancel.html",
+            success_url=success_url,
+            cancel_url=cancel_url,
         )
         return jsonify({'url': checkout_session.url})
     except Exception as e:
-        print(f"创建Stripe会话时发生错误: {e}")
         return jsonify(error=str(e)), 403
 
-# --- Webhook (来自外部服务，不需要认证) ---
 @app.route('/webhook/stripe', methods=['POST'])
 def stripe_webhook():
+    """接收Stripe事件，更新用户点数"""
     payload = request.data
     sig_header = request.headers.get('Stripe-Signature')
-    print("\n--- 收到Stripe Webhook事件 ---")
-
     try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, app.config['STRIPE_WEBHOOK_SECRET']
-        )
+        event = stripe.Webhook.construct_event(payload, sig_header, app.config['STRIPE_WEBHOOK_SECRET'])
     except (ValueError, stripe.error.SignatureVerificationError) as e:
-        print(f"Webhook 签名验证失败: {e}")
-        return 'Webhook 签名验证失败', 400
+        return 'Webhook签名验证失败', 400
 
     if event['type'] == 'checkout.session.completed':
         session = event['data']['object']
         user_id = session.get('client_reference_id')
         if user_id:
-            with app.app_context(): # 在Webhook中需要应用上下文来操作数据库
+            with app.app_context():
                 user = User.query.get(user_id)
                 if user:
                     user.points += app.config['POINTS_PER_PURCHASE']
                     db.session.commit()
-                    print(f"✅ 支付成功! 已为用户 {user.email} (ID: {user_id}) 增加了 {app.config['POINTS_PER_PURCHASE']} 点数。")
-                else:
-                    print(f"错误: 支付成功，但找不到用户ID: {user_id}")
-        else:
-            print("错误: 支付成功，但Stripe会话中缺少 client_reference_id")
-
+                    print(f"✅ 支付成功! 已为用户 {user.id} 增加了点数。")
     return 'Success', 200
 
-# --- 启动脚本 ---
 if __name__ == '__main__':
-    # 检查配置是否为占位符
-    if app.config['STRIPE_SECRET_KEY'].startswith("sk_test_..."):
-        print("\n警告: 您正在使用占位Stripe私钥。")
-    if app.config['STRIPE_WEBHOOK_SECRET'].startswith("whsec_..."):
-        print("警告: 您正在使用占位Webhook密钥。")
-    if app.config['STRIPE_PRICE_ID'].startswith("price_..."):
-        print("警告: 您正在使用占位价格ID。")
-    
-    print("\n服务器正在启动，请访问 http://localhost:5001")
-    print("要初始化或升级数据库，请在终端中运行 'flask db upgrade'")
-    
-    app.run(port=5001, debug=True, use_reloader=True)
+    app.run(port=5001, debug=True)

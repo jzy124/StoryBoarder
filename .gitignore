@@ -68,3 +68,5 @@ Thumbs.db
 *.swo
 *~
 nbproject/
+
+jwks_cache.json

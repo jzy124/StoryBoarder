@@ -92,3 +92,9 @@ export const STYLES: StyleOption[] = [
     icon: Feather
   }
 ];
+
+export interface UserProfile {
+  id: string;
+  email: string;
+  points: number;
+}

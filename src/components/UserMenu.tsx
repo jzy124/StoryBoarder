@@ -1,15 +1,31 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { User, LogOut, LayoutGrid, ChevronDown, MessageSquare } from 'lucide-react';
+import { User, LogOut, LayoutGrid, ChevronDown, MessageSquare, CreditCard, Sparkles } from 'lucide-react';
+import { createCheckoutSession } from '../services/paymentService';
 
 interface UserMenuProps {
   email: string;
+  points: number | null;
   onLogout: () => void;
   onOpenGallery: () => void;
 }
 
-export const UserMenu: React.FC<UserMenuProps> = ({ email, onLogout, onOpenGallery }) => {
+// vvvvvvvvvvvv  唯一的修改在这里 vvvvvvvvvvvv
+export const UserMenu: React.FC<UserMenuProps> = ({ email, points, onLogout, onOpenGallery }) => {
+// ^^^^^^^^^^^^  唯一的修改在这里 ^^^^^^^^^^^^
   const [isOpen, setIsOpen] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const handlePurchase = async () => {
+      setIsRedirecting(true);
+      try {
+          const { url } = await createCheckoutSession();
+          window.location.href = url;
+      } catch (error) {
+          alert('创建支付链接失败，请稍后重试。');
+          setIsRedirecting(false);
+      }
+  };
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -60,6 +76,19 @@ export const UserMenu: React.FC<UserMenuProps> = ({ email, onLogout, onOpenGalle
             <MessageSquare size={16} className="text-gray-500" />
             Feedback
           </a>
+
+          <div className="px-4 py-3 border-t border-b border-gray-50">
+            <p className="text-xs text-gray-400">Credits</p>
+            <div className="flex items-center justify-between mt-1">
+              <p className="text-sm text-gray-900 flex items-center gap-1">
+                <Sparkles size={16} className="text-blue-500" />
+                {points !== null ? `${points} points remaining` : 'Loading...'}
+              </p>
+              <button onClick={handlePurchase} disabled={isRedirecting} className="px-3 py-1 text-xs font-semibold text-white bg-blue-600 rounded-full hover:bg-blue-700 disabled:opacity-50">
+                {isRedirecting ? 'Redirecting...' : 'Buy Credits'}
+              </button>
+            </div>
+          </div>
           
           <button
             onClick={() => {

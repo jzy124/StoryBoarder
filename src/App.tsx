@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   ArrowRight, 
   Upload, 
@@ -24,10 +24,13 @@ import { supabase } from './services/supabase';
 import { Session } from '@supabase/supabase-js';
 import Auth from './Auth';
 import { UserMenu } from './components/UserMenu';
+import { getUserProfile, deductPointsForGeneration } from './services/paymentService'; // 新增
+import { UserProfile } from './types'; // 新增
 import { Gallery } from './components/Gallery';
 import { StepResult } from './components/StepResult';
 import { GalleryDetailPage } from './components/GalleryDetailPage';
 import posthog from 'posthog-js';
+
 
 // --- Components ---
 
@@ -75,6 +78,10 @@ const ProgressBar = ({ current, total }: { current: number; total: number }) => 
 
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
+
+  // --- 在 session state 下方，增加下面的 state ---
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [appConfig, setAppConfig] = useState<{ cost_per_generation: number } | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
 
   // Navigation State
@@ -94,55 +101,77 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const fetchProfileAndConfig = useCallback(async () => {
+      if (session) {
+          try {
+              const { user, config } = await getUserProfile();
+              setProfile(user);
+              setAppConfig(config);
+          } catch (error) {
+              console.error("获取用户点数失败:", error);
+              await supabase.auth.signOut(); 
+          }
+      }
+  }, [session]);
   
   // Logic to handle standalone URLs (simulating a router)
   useEffect(() => {
-    const handleUrlRoute = () => {
-        const path = window.location.pathname;
+    // 标记订阅事件，以便清理
+    let authListener: any = null;
+
+    async function initializeSession() {
+        // 1. 首次加载时，获取当前会话
+        const { data: { session: initialSession }, error } = await supabase.auth.getSession();
         
-        // Match /gallery/:id
-        const galleryMatch = path.match(/^\/gallery\/([a-zA-Z0-9-]+)$/);
-        
-        if (galleryMatch) {
-            setSharedImageId(galleryMatch[1]);
-            setStep('gallery-detail');
-            setCheckingSession(false); // Skip session check block for public view
-            return true;
+        if (error) {
+            console.error("获取会话时出错:", error);
         }
-        return false;
+        
+        // 2. 更新 session 状态
+        setSession(initialSession);
+
+        // 3. 如果初始会话存在，立即获取用户点数
+        if (initialSession) {
+            posthog.identify(initialSession.user.id, { email: initialSession.user.email });
+            await fetchProfileAndConfig(initialSession);
+        }
+        
+        // 4. 加载完成
+        setCheckingSession(false);
+
+        // 5. 监听后续的认证状态变化
+        const { data } = supabase.auth.onAuthStateChange(
+            async (_event, newSession) => {
+                setSession(newSession);
+
+                if (_event === 'SIGNED_IN' && newSession) {
+                    posthog.identify(newSession.user.id, { email: newSession.user.email });
+                    // 登录成功后，获取用户点数
+                    await fetchProfileAndConfig(newSession);
+                }
+
+                if (_event === 'SIGNED_OUT') {
+                    posthog.reset();
+                    // 登出后，清空用户点数
+                    setProfile(null);
+                    setAppConfig(null);
+                    if (step !== 'gallery-detail') {
+                        setStep('hero');
+                    }
+                    resetState();
+                }
+            }
+        );
+        authListener = data.subscription;
+    }
+
+    initializeSession();
+
+    // 6. 组件卸载时，取消订阅
+    return () => {
+        authListener?.unsubscribe();
     };
-
-    if (handleUrlRoute()) return;
-
-    // Normal Auth Flow if not deep linking
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setCheckingSession(false);
-      if (session?.user) {
-        posthog.identify(session.user.id, { email: session.user.email });
-      }
-    });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      if (_event === 'SIGNED_IN' && session?.user) {
-        posthog.identify(session.user.id, { email: session.user.email });
-        // We let the useEffect below handle the redirect based on returnTo
-      }
-      if (_event === 'SIGNED_OUT') {
-        posthog.reset();
-        // If we are on a detail page, don't force redirect to hero
-        if (step !== 'gallery-detail') {
-            setStep('hero');
-        }
-        resetState();
-      }
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
+}, [fetchProfileAndConfig, step]); // 依赖 fetchProfileAndConfig 和 step
 
   // Post-Login Redirect Effect
   useEffect(() => {
@@ -369,6 +398,18 @@ export default function App() {
   };
 
   const handleGenerate = async () => {
+    if (!profile || !appConfig || profile.points < appConfig.cost_per_generation) {
+        alert(`点数不足！每次生成需要 ${appConfig?.cost_per_generation || '一些'} 点数。请点击右上角头像进行充值。`);
+        return;
+    }
+    try {
+        const { remaining_points } = await deductPointsForGeneration();
+        setProfile(prev => prev ? { ...prev, points: remaining_points } : null);
+    } catch (error) {
+        alert(`扣点失败: ${error.message}`);
+        fetchProfileAndConfig(); // 同步回正确的点数
+        return; 
+    }
     // 1. Prepare scenes immediately to avoid flickering (sets isGenerating: true on all items)
     const resetScenes = scenes.map(s => ({
         ...s,
@@ -886,10 +927,11 @@ export default function App() {
                 )
              ) : session ? (
                <UserMenu 
-                 email={session.user.email || ''} 
-                 onLogout={handleSignOut} 
-                 onOpenGallery={() => setStep('gallery')} 
-               />
+                  email={session.user.email || ''} 
+                  points={profile ? profile.points : null} // 修改：传递点数
+                  onLogout={handleSignOut} 
+                  onOpenGallery={() => setStep('gallery')} 
+                />
              ) : (
                <Button variant="secondary" onClick={navigateToAuth} className="px-5 py-2 text-sm">
                   Sign In
