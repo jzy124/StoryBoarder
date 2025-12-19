@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai"; // 👈 1. 引入新库
-import { Scene } from "../types";
+import { Scene } from "./types";
 
 // 初始化客户端
 const getClient = () => {
