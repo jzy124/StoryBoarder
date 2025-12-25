@@ -70,3 +70,4 @@ Thumbs.db
 nbproject/
 
 jwks_cache.json
+migrations/

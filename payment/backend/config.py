@@ -24,4 +24,4 @@ class Config:
     # 应用相关配置
     YOUR_DOMAIN = 'http://localhost:5001'
     POINTS_PER_PURCHASE = 10 # 每次购买增加的点数
-    COST_PER_GENERATION = 1  # 每次生成消耗的点数
+    COST_PER_GENERATION = 1  # 每次每个scene生成消耗的点数

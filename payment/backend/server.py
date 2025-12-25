@@ -7,7 +7,7 @@ from jwt import algorithms as jwt_algorithms
 import datetime
 from functools import wraps
 from flask import Flask, request, jsonify, current_app as app
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 from flask_migrate import Migrate
 import logging # 导入日志模块
 import requests # 需要安装 requests 库: pip install requests
@@ -27,7 +27,7 @@ print(f"--- DEBUG: Loaded SUPABASE_JWT_SECRET is: {app.config.get('SUPABASE_JWT_
 # --- 最终的、最强力的CORS配置 ---
 # 我们允许任何来源(*)在开发环境中访问，并确保所有必需的头部都已设置
 # 这可以彻底排除CORS配置错误
-CORS(app, resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
+CORS(app, origins=["http://localhost:3000"], supports_credentials=True)
 # -----------------------------------
 
 db.init_app(app)
@@ -166,31 +166,56 @@ def get_user_profile(current_user):
     }
     return jsonify({ "user": user_to_dict(current_user), "config": config_data })
 
+# ... (其他 import 和路由) ...
+
 @app.route('/api/generate', methods=['POST'])
 @token_required
 def generate(current_user):
-    """处理生成请求并扣除点数"""
-    if current_user.points < app.config['COST_PER_GENERATION']:
+    """
+    (已升级) 处理生成请求并扣除指定数量的点数
+    """
+    # --- 核心修改：从请求体中获取要扣除的数量 ---
+    data = request.get_json()
+    if not data or 'amount' not in data:
+        return jsonify({"error": "请求中缺少'amount'参数"}), 400
+    
+    amount_to_deduct = data.get('amount')
+    
+    # 服务器端验证，防止前端发送恶意数据
+    if not isinstance(amount_to_deduct, int) or amount_to_deduct <= 0:
+        return jsonify({"error": "'amount'必须是一个正整数"}), 400
+    # -----------------------------------------------
+
+    print(f"收到来自用户 {current_user.email} 的扣点请求，数量: {amount_to_deduct}。")
+
+    if current_user.points < amount_to_deduct:
+        print(f"用户 {current_user.email} 点数不足。")
         return jsonify({"error": "点数不足，请充值"}), 402
-    current_user.points -= app.config['COST_PER_GENERATION']
+    
+    # 扣除指定数量的点数
+    current_user.points -= amount_to_deduct
     db.session.commit()
-    return jsonify({ "message": "点数扣除成功！", "remaining_points": current_user.points })
+    print(f"扣点成功。用户 {current_user.email} 剩余点数: {current_user.points}")
+
+    return jsonify({
+        "message": "点数扣除成功！",
+        "remaining_points": current_user.points
+    })
 
 @app.route('/api/create-checkout-session', methods=['POST'])
 @token_required
 def create_checkout_session(current_user):
     """为当前登录用户创建Stripe支付会话"""
     try:
+        frontend_url = 'http://localhost:3000' # 您的前端地址
         # 成功/取消URL现在应该指向你的Vite前端应用
-        success_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000') + '/payment-success'
-        cancel_url = os.environ.get('FRONTEND_URL', 'http://localhost:3000') + '/'
 
         checkout_session = stripe.checkout.Session.create(
             client_reference_id=current_user.id,
             line_items=[{'price': app.config['STRIPE_PRICE_ID'], 'quantity': 1}],
             mode='payment',
-            success_url=success_url,
-            cancel_url=cancel_url,
+            success_url=f"{frontend_url}/payment-success", # 指向新的React路由
+            cancel_url=f"{frontend_url}/payment-canceled",   # 指向新的React路由
         )
         return jsonify({'url': checkout_session.url})
     except Exception as e:

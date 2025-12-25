@@ -101,18 +101,27 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
-  const fetchProfileAndConfig = useCallback(async () => {
-      if (session) {
-          try {
-              const { user, config } = await getUserProfile();
-              setProfile(user);
-              setAppConfig(config);
-          } catch (error) {
-              console.error("获取用户点数失败:", error);
-              await supabase.auth.signOut(); 
-          }
-      }
-  }, [session]);
+  const fetchProfileAndConfig = useCallback(async (currentSession) => {
+    // 确保有会话才执行
+    if (!currentSession) {
+        setProfile(null);
+        setAppConfig(null);
+        return;
+    }
+
+    try {
+        console.log("Fetching profile and config..."); // 添加日志方便调试
+        // 假设 getUserProfile 是从 service 文件导入的
+        const { user, config } = await getUserProfile(); 
+        setProfile(user);
+        setAppConfig(config);
+    } catch (error) {
+        console.error("获取用户 profile 和 config 失败:", error);
+        // 如果获取失败（比如token过期），也应该清空状态
+        setProfile(null);
+        setAppConfig(null);
+    }
+}, []); // <-- 关键：空的依赖数组，表示这个函数本身不依赖任何外部状态
   
   // Logic to handle standalone URLs (simulating a router)
   useEffect(() => {
@@ -171,7 +180,7 @@ export default function App() {
     return () => {
         authListener?.unsubscribe();
     };
-}, [fetchProfileAndConfig, step]); // 依赖 fetchProfileAndConfig 和 step
+}, []); // 依赖 fetchProfileAndConfig 和 step
 
   // Post-Login Redirect Effect
   useEffect(() => {
@@ -301,11 +310,28 @@ export default function App() {
     });
   };
 
-  const handleRegenerateSingle = async (index: number) => {
+  // 在 App.tsx 中
+
+const handleRegenerateSingle = async (index: number) => {
     const sceneToRegen = scenes[index];
     if (!sceneToRegen || sceneToRegen.isGenerating) return;
 
-    // UI Update: Set loading for this scene
+    // --- 1. 点数检查与扣除 ---
+    if (!profile || !appConfig || profile.points < appConfig.cost_per_generation) {
+        alert(`Insufficient credits. Regeneration requires ${appConfig.cost_per_generation} credits.`);
+        return;
+    }
+    try {
+        // 假设扣点API支持传入要扣除的数量
+        const { remaining_points } = await deductPointsForGeneration(appConfig.cost_per_generation);
+        setProfile(prev => prev ? { ...prev, points: remaining_points } : null);
+    } catch (error) {
+        alert(`Failed to deduct credits: ${(error as Error).message}`);
+        fetchProfileAndConfig(); // 同步回正确的点数
+        return; 
+    }
+
+    // --- 2. UI 更新 (设置加载状态) ---
     setScenes(prev => {
         const updated = [...prev];
         updated[index].isGenerating = true;
@@ -314,58 +340,21 @@ export default function App() {
     });
 
     try {
-        const styleData = STYLES.find(s => s.id === selectedStyle);
-        const stylePrompt = styleData ? styleData.promptModifier : '';
-        const isFrameless = selectedStyle === 'doodle' || selectedStyle === 'lineart' || selectedStyle === 'corporate' || selectedStyle === 'loose';
-        const refImage = character.imageBase64 || undefined;
-        
-        // Re-run analysis if needed (local scope)
-        let visualAnalysis = "";
-        if (refImage) {
-            try {
-                visualAnalysis = await analyzeCharacterFromImage(refImage);
-            } catch (e) {
-                console.warn("Analysis failed during regen");
-            }
-        }
+        // --- 3. 调用共享的上下文构建函数 ---
+        const { 
+            stylePrompt, 
+            characterContext, 
+            compositionRules, 
+            negativeRules, 
+            refImage 
+        } = await buildPromptContext(character, selectedStyle);
 
-        // Re-build context
-        let characterContext = "";
-        if (refImage && character.description.trim()) {
-            characterContext = `
-            **VISUAL ANCHOR**: The attached image is the REFERENCE for the MAIN CHARACTER.
-            **USER INSTRUCTIONS**: ${character.description}.
-            **CONSISTENCY RULE**: Combine the facial features and physical build of the reference image with the specific clothing or details described by the user.
-            **MANDATORY TRAITS FROM IMAGE**: ${visualAnalysis}
-            `;
-        } else if (refImage) {
-            characterContext = `
-            **VISUAL ANCHOR**: The attached image is the REFERENCE for the MAIN CHARACTER.
-            **MANDATORY TRAITS**: ${visualAnalysis || "Match the reference image exactly."}
-            **INSTRUCTION**: The Main Character in the generated panel MUST look identical to this reference (same face, hair, outfit).
-            `;
-        } else if (character.description.trim()) {
-            characterContext = `
-            **MAIN CHARACTER PROFILE**: ${character.description}.
-            **CONSISTENCY RULE**: Maintain this specific appearance (hair, clothes, accessories) across every single panel.
-            `;
-        } else {
-            characterContext = "**MAIN CHARACTER**: A generic user persona (keep gender/clothing consistent if generated previously).";
-        }
-
-        const compositionRules = isFrameless
-            ? "Draw a single isolated spot illustration on a pure white background. ABSOLUTELY NO FRAME, NO BORDER, NO BOUNDING BOX. The image must be a free-floating sketch. **Draw the subject LARGE and CENTERED, filling approximately 80% of the canvas. Do not draw tiny figures.**"
-            : "Draw exactly ONE comic panel with a clear frame. **The subject MUST fill the panel (Medium Shot). Avoid wide shots where the character looks small.**";
-
-        const negativeRules = isFrameless
-            ? "frame, border, square box, bounding box, panel edges, comic panel layout, grid, rectangle border, frame lines, corner, canvas frame, tiny characters, large empty space"
-            : "Do not create a grid; generate a single image. tiny characters, zoomed out";
-
+        // --- 4. 构建该场景专属的 finalPrompt ---
         const finalPrompt = `
               **ROLE**: Professional Comic Book Artist.
               **VISUAL STYLE**: ${stylePrompt}.
               ${characterContext}
-              **SCENE SCRIPT (Panel ${index+1})**:
+              **SCENE SCRIPT (Panel ${index + 1})**:
               ${sceneToRegen.description}.
               **COMPOSITION GUIDELINES**:
               1. ${compositionRules}
@@ -377,6 +366,7 @@ export default function App() {
               Do not change the Main Character's outfit or hair (unless instructed). Do not add text bubbles unless specified. ${negativeRules}
         `;
 
+        // --- 5. 调用API并更新UI ---
         const imageUrl = await generateImageFromPrompt(finalPrompt, refImage);
         
         setScenes(prev => {
@@ -388,135 +378,224 @@ export default function App() {
 
     } catch (e) {
         console.error("Regen failed", e);
+        // 如果生成失败，也要更新UI状态
         setScenes(prev => {
             const updated = [...prev];
             updated[index].error = "Failed to regenerate";
             updated[index].isGenerating = false;
             return updated;
         });
+        // 可选：将扣除的点数还给用户
+        // await refundPoints(appConfig.cost_per_generation);
+        // fetchProfileAndConfig(); 
     }
-  };
+};
 
-  const handleGenerate = async () => {
-    if (!profile || !appConfig || profile.points < appConfig.cost_per_generation) {
-        alert(`点数不足！每次生成需要 ${appConfig?.cost_per_generation || '一些'} 点数。请点击右上角头像进行充值。`);
+
+// 在 App.tsx 中
+
+const handleGenerate = async () => {
+    const startTime = performance.now(); // 记录总起始时间
+    console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: Function started.`);
+
+    // --- Phase 1: 同步检查 ---
+    const totalCost = (appConfig?.cost_per_generation || 10) * scenes.length;
+    if (!profile || !appConfig || profile.points < totalCost) {
+        alert(`Insufficient credits. Generating ${scenes.length} scenes requires ${totalCost} credits. Please purchase more credits by clicking on your profile icon.`);
         return;
     }
-    try {
-        const { remaining_points } = await deductPointsForGeneration();
-        setProfile(prev => prev ? { ...prev, points: remaining_points } : null);
-    } catch (error) {
-        alert(`扣点失败: ${error.message}`);
-        fetchProfileAndConfig(); // 同步回正确的点数
-        return; 
-    }
-    // 1. Prepare scenes immediately to avoid flickering (sets isGenerating: true on all items)
-    const resetScenes = scenes.map(s => ({
-        ...s,
-        imageUrl: undefined,
-        isGenerating: true,
-        error: null
-    }));
-    
-    // 2. Update State BEFORE switching view
-    setScenes(resetScenes);
-    setIsGenerating(true);
+    console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: Pre-flight checks passed.`);
+
+    // --- Phase 2: UI更新与跳转 ---
+    const initialScenesWithLoading = scenes.map(s => ({ ...s, imageUrl: undefined, isGenerating: true, error: null }));
+    setScenes(initialScenesWithLoading);
+    setIsGenerating(true); 
     setStep('result');
+    console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: UI updated and navigated to 'result' page.`);
+
+    // --- Phase 3: 后台耗时操作 ---
+    try {
+        // a. 计时：扣点
+        console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: AWAITING points deduction...`);
+        const { remaining_points } = await deductPointsForGeneration(totalCost);
+        console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: Points deduction COMPLETE.`);
+        setProfile(prev => prev ? { ...prev, points: remaining_points } : null);
+
+        // b. 计时：角色分析
+        const styleData = STYLES.find(s => s.id === selectedStyle);
+        const stylePrompt = styleData ? styleData.promptModifier : '';
+        const refImage = character.imageBase64 || undefined;
+        
+        let visualAnalysis = "";
+        if (refImage) {
+            console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: AWAITING character analysis...`);
+            visualAnalysis = await analyzeCharacterFromImage(refImage).catch(e => {
+                console.warn("Character analysis failed, proceeding without it.", e);
+                return "";
+            });
+            console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: Character analysis COMPLETE.`);
+        }
+
+        // c. 构建Prompt片段 (同步操作)
+        const characterContext = buildCharacterContext(character, visualAnalysis);
+        const compositionRules = buildCompositionRules(selectedStyle);
+        const negativeRules = buildNegativeRules(selectedStyle);
+        console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: All contexts and rules built.`);
+
+        // d. 计时：并行生成所有图片
+        console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: AWAITING all image generations to complete...`);
+        const generationPromises = initialScenesWithLoading.map((scene, index) => {
+            const generateSingleScene = async () => {
+                const singleStartTime = performance.now();
+                try {
+                    const finalPrompt = `
+                      **ROLE**: Professional Comic Book Artist.
+                      
+                      **VISUAL STYLE**: ${stylePrompt}.
+                      
+                      ${characterContext}
+                      
+                      **SCENE SCRIPT (Panel ${index + 1})**:
+                      ${scene.description}.
+                      
+                      **COMPOSITION GUIDELINES**:
+                      1. ${compositionRules}
+                      2. **CAMERA DISTANCE**: Use a MEDIUM SHOT by default unless the script explicitly asks for a close-up or wide shot. Ensure consistent character size across panels.
+                      3. Focus on the MAIN CHARACTER's reaction or action described in the script.
+                      4. If other people are in the scene, they MUST look different from the Main Character.
+                      5. Backgrounds should be clean and match the style.
+                      
+                      **NEGATIVE PROMPT**:
+                      Do not change the Main Character's outfit or hair (unless instructed). Do not add text bubbles unless specified. ${negativeRules}
+                    `;
+
+                    if (index === 0) { // 只为第一个场景打印，避免刷屏
+                        console.log("--- Final Prompt for Scene 0: ---");
+                        console.log(finalPrompt);
+                        console.log("---------------------------------");
+                    }
+
+                    // 计时：单个图片的生成
+                    console.log(`[Scene ${index}] AWAITING image generation...`);
+                    const imageUrl = await generateImageFromPrompt(finalPrompt, refImage);
+                    console.log(`[Scene ${index}] Image generation COMPLETE. (Took ${(performance.now() - singleStartTime).toFixed(2)}ms)`);
+
+                    setScenes(prevScenes =>
+                        prevScenes.map(s =>
+                            s.id === scene.id ? { ...s, imageUrl, isGenerating: false } : s
+                        )
+                    );
+                } catch (e) {
+                    console.error(`[Scene ${index}] FAILED to generate. (After ${(performance.now() - singleStartTime).toFixed(2)}ms)`, e);
+                    setScenes(prevScenes =>
+                        prevScenes.map(s =>
+                            s.id === scene.id ? { ...s, error: "生成失败", isGenerating: false } : s
+                        )
+                    );
+                }
+            };
+            return generateSingleScene();
+        });
+
+        await Promise.all(generationPromises);
+        console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: All image generations COMPLETE.`);
+
+    } catch (error) {
+        console.error(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: FAILED with error:`, (error as Error).message);
+        alert(`Operation failed: ${(error as Error).message}`);
+        fetchProfileAndConfig();
+        setStep('style'); 
+        setScenes(scenes.map(s => ({...s, isGenerating: false})));
+    } finally {
+        setIsGenerating(false);
+        console.log(`[${(performance.now() - startTime).toFixed(2)}ms] handleGenerate: Function finished.`);
+    }
+};
+
+// 在 App.tsx 中，可以放在其他 build... 函数旁边
+
+// 这是一个异步函数，因为它需要调用 analyzeCharacterFromImage
+const buildPromptContext = async (
+    character: { imageBase64?: string | null; description: string },
+    selectedStyle: string
+): Promise<{ stylePrompt: string; characterContext: string; compositionRules: string; negativeRules: string; refImage: string | undefined }> => {
     
     const styleData = STYLES.find(s => s.id === selectedStyle);
-    const stylePrompt = styleData ? styleData.promptModifier : '';
-    const isFrameless = selectedStyle === 'doodle' || selectedStyle === 'lineart' || selectedStyle === 'corporate' || selectedStyle === 'loose';
-    
+    // ！！！确保这里的属性名是正确的！！！
+    const stylePrompt = styleData ? styleData.promptModifier : ''; 
     const refImage = character.imageBase64 || undefined;
-    
-    let visualAnalysis = "";
 
-    // 3. Pre-Analysis Phase
+    let visualAnalysis = "";
     if (refImage) {
-      try {
-        visualAnalysis = await analyzeCharacterFromImage(refImage);
-      } catch (e) {
-        console.warn("Character analysis failed");
-      }
+        try {
+            visualAnalysis = await analyzeCharacterFromImage(refImage);
+        } catch (e) {
+            console.warn("Character analysis failed during context build", e);
+        }
     }
 
-    // 4. Build Character Context
-    let characterContext = "";
-    
-    if (refImage && character.description.trim()) {
-        characterContext = `
+    // 调用我们已有的辅助函数
+    const characterContext = buildCharacterContext(character, visualAnalysis);
+    const compositionRules = buildCompositionRules(selectedStyle);
+    const negativeRules = buildNegativeRules(selectedStyle);
+
+    return {
+        stylePrompt,
+        characterContext,
+        compositionRules,
+        negativeRules,
+        refImage
+    };
+};
+
+// 在 App.tsx 中
+
+const buildCharacterContext = (
+    character: { imageBase64?: string | null; description?: string | null }, // 允许 description 为 undefined 或 null
+    visualAnalysis: string
+): string => {
+    const refImage = character.imageBase64;
+    // --- 核心修正：增加安全检查和默认值 ---
+    const description = character.description || ''; // 如果 description 是 undefined/null/空字符串，就把它当作空字符串''
+
+    if (refImage && description.trim()) {
+        return `
         **VISUAL ANCHOR**: The attached image is the REFERENCE for the MAIN CHARACTER.
-        **USER INSTRUCTIONS**: ${character.description}.
+        **USER INSTRUCTIONS**: ${description}.
         **CONSISTENCY RULE**: Combine the facial features and physical build of the reference image with the specific clothing or details described by the user.
         **MANDATORY TRAITS FROM IMAGE**: ${visualAnalysis}
         `;
     } else if (refImage) {
-        characterContext = `
+        return `
         **VISUAL ANCHOR**: The attached image is the REFERENCE for the MAIN CHARACTER.
         **MANDATORY TRAITS**: ${visualAnalysis || "Match the reference image exactly."}
         **INSTRUCTION**: The Main Character in the generated panel MUST look identical to this reference (same face, hair, outfit).
         `;
-    } else if (character.description.trim()) {
-        characterContext = `
-        **MAIN CHARACTER PROFILE**: ${character.description}.
+    } else if (description.trim()) {
+        return `
+        **MAIN CHARACTER PROFILE**: ${description}.
         **CONSISTENCY RULE**: Maintain this specific appearance (hair, clothes, accessories) across every single panel.
         `;
     } else {
-        characterContext = "**MAIN CHARACTER**: A generic user persona (keep gender/clothing consistent if generated previously).";
+        return "**MAIN CHARACTER**: A generic user persona (keep gender/clothing consistent if generated previously).";
     }
+};
 
-    const compositionRules = isFrameless
+const buildCompositionRules = (selectedStyle: string): string => {
+    const isFrameless = ['doodle', 'lineart', 'corporate', 'loose'].includes(selectedStyle);
+
+    return isFrameless
         ? "Draw a single isolated spot illustration on a pure white background. ABSOLUTELY NO FRAME, NO BORDER, NO BOUNDING BOX. The image must be a free-floating sketch. **Draw the subject LARGE and CENTERED, filling approximately 80% of the canvas. Do not draw tiny figures.**"
         : "Draw exactly ONE comic panel with a clear frame. **The subject MUST fill the panel (Medium Shot). Avoid wide shots where the character looks small.**";
+};
 
-    const negativeRules = isFrameless
+const buildNegativeRules = (selectedStyle: string): string => {
+    const isFrameless = ['doodle', 'lineart', 'corporate', 'loose'].includes(selectedStyle);
+
+    return isFrameless
         ? "frame, border, square box, bounding box, panel edges, comic panel layout, grid, rectangle border, frame lines, corner, canvas frame, tiny characters, large empty space"
         : "Do not create a grid; generate a single image. tiny characters, zoomed out";
-
-    // 5. Generate loop using the resetScenes we created earlier
-    const updatedScenes = [...resetScenes];
-    
-    for (let i = 0; i < updatedScenes.length; i++) {
-        // Ensure state is synced
-        updatedScenes[i].isGenerating = true;
-        setScenes([...updatedScenes]); 
-        
-        try {
-            const finalPrompt = `
-              **ROLE**: Professional Comic Book Artist.
-              
-              **VISUAL STYLE**: ${stylePrompt}.
-              
-              ${characterContext}
-              
-              **SCENE SCRIPT (Panel ${i+1})**:
-              ${updatedScenes[i].description}.
-              
-              **COMPOSITION GUIDELINES**:
-              1. ${compositionRules}
-              2. **CAMERA DISTANCE**: Use a MEDIUM SHOT by default unless the script explicitly asks for a close-up or wide shot. Ensure consistent character size across panels.
-              3. Focus on the MAIN CHARACTER's reaction or action described in the script.
-              4. If other people are in the scene, they MUST look different from the Main Character.
-              5. Backgrounds should be clean and match the style.
-              
-              **NEGATIVE PROMPT**:
-              Do not change the Main Character's outfit or hair (unless instructed). Do not add text bubbles unless specified. ${negativeRules}
-            `;
-            
-            const imageUrl = await generateImageFromPrompt(finalPrompt, refImage);
-            updatedScenes[i].imageUrl = imageUrl;
-        } catch (e) {
-            console.error(`Failed to generate scene ${i}`, e);
-            updatedScenes[i].imageUrl = undefined;
-            updatedScenes[i].error = "Generation failed. Please try again.";
-        } finally {
-            updatedScenes[i].isGenerating = false;
-            setScenes([...updatedScenes]);
-        }
-    }
-    
-    setIsGenerating(false);
-  };
+};
 
   // --- Views ---
 
